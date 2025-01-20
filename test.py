@@ -39,7 +39,7 @@ molecule = 'lih'
 samples = '120'
 steps = '600'
 
-filename = 'lih_hadamard_measurements_npcs_600_steps_5_shots_better_integration.npy'
+filename = 'lih_hadamard_measurements_npcs_500_steps_5_shots_better_integration.npy'
 #filename_noisy = 'lih_hadamard_measurements_npcs_320_steps_25_shots.npy'
 # filename_noisy2 = 'lih_hadamard_measurements_cs_320_steps_125_shots.npy'
 
@@ -70,8 +70,8 @@ start = time.time()
 # b = A @ z
 #reconstructed_signal = recover_signal(filename, guess_freq)
 
-reconstructed_signal, indices = run_ivdst_from_file(filename)
-reconstructed_signal_gg, indices = run_ivdst_from_file(filename, guess_freq)
+reconstructed_signal, indices = run_ivdst_from_file(filename, samples=10)
+reconstructed_signal_gg, indices = run_ivdst_from_file(filename, guess_freq, samples=10)
 
 
 from music import process_signal, estimate_frequencies_and_compute_error
@@ -113,8 +113,8 @@ print(end - start)
 
 #np.save("ivdst_test", reconstructed_signal)
 
-plt.plot(x_axis_noisy, y_axis_noisy)
-plt.plot(x_axis_noisy_gg, y_axis_noisy_gg)
+plt.plot(x_axis, y_axis)
+plt.plot(x_axis_gg, y_axis_gg)
 
 # plt.plot(reconstructed_signal, '*')
 # plt.plot(np.load('lih_hadamard_measurements_npcs_600_steps_5_shots_better_integration.npy', allow_pickle = True), '--')
