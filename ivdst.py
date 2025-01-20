@@ -72,7 +72,7 @@ def toeplitz_to_hankel(toeplitz_matrix):
     
     return hankel_matrix
 
-def initialization_from_file(filename, samples = 10):
+def initialization_from_file(filename, samples = 20):
     z, non_null_indices = load_data(filename, samples)
     mask = create_modified_identity_matrix(len(z), non_null_indices)
     masked_z = jnp.dot(jnp.transpose(mask), z)
@@ -85,7 +85,7 @@ def initialization_from_file(filename, samples = 10):
 
     return z, T0, ni0, non_null_indices
 
-def initialization_theoretical_guess_from_file(filename, guess_freq, samples = 10):
+def initialization_theoretical_guess_from_file(filename, guess_freq, samples = 20):  #### here we have to ensure that we are taking the gradients w.r.t. measurements only
     z, non_null_indices = load_data(filename, samples)
 
     artificial_z = guess_autocorr(guess_freq, len(z))
@@ -198,8 +198,8 @@ def build_Z_matrix(variables):
 def apply_gradient_descent(variables, z, P, step_size = 5e-3):
     
     signal, T_matrix, scalar_ni = variables
-    
-    updated_signal = signal - step_size * jnp.dot(P, (jnp.dot(P, signal) - z))
+    measurements = jnp.dot(P, z)
+    updated_signal = signal - step_size * jnp.dot(P, (jnp.dot(P, signal) - measurements))
 
     return (updated_signal, T_matrix, scalar_ni)
 
