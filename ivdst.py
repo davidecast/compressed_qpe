@@ -315,7 +315,8 @@ def run_ivdst_from_file(filename, frequencies = None, samples = 50):
 
         new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = one_step_iteration(z, mask, new_variables, variables, new_iteration_numb, old_momentum_coeff, 1e-2, 1e-3)
         conv = convergence
-        print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
+        if (new_iteration_numb % 20) == 0:
+            print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
 
     return new_variables[0], non_null_indices
 

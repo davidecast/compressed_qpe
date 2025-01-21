@@ -7,11 +7,9 @@ Created on Wed Sep  12 17:51:17 2024
 """
 
 import numpy as np
-import scipy
 import math
 from scipy.signal import find_peaks
 from matplotlib import pyplot as plt
-import source as srs
 import qeep_prony as prony
 
 def construct_projector(S, dim, num_singular_values):
@@ -112,54 +110,4 @@ def plot_spectrum(X_axis, Y2_axis, energies, f1, f2, nameplot):
     plt.gcf().set_size_inches(fig_width, fig_height)
 
     plt.savefig(nameplot + '.png', dpi=300, bbox_inches='tight')
-
-# # Main code to run the analysis on multiple signals
-# if __name__ == "__main__":
-#     steps = "225"
-#     molecule = 'lih'
-#     samples = "150"
-#     hamiltonian_norm = 8
-#     num_singular_values = 2
-
-#     value = (1 / float(samples)) * np.sqrt((0.3 * float(steps)) / 2)
-
-#     lams = [np.logspace(np.log10(value) - 2, np.log10(value) + 2, num=6)[0]]
-#     signals = []
-   
-#     for k in range(10):
-#         filepath = molecule + f"_reconstructed_signal_set_{k}_" + samples + "_" + steps + "steps.npy"
-#         data = np.load(filepath)
-#         signals.append(data)
-        
-
-#     Data = np.stack(signals)
-#     dim = int(len(Data[0]) / 2)
-
-#     spectra_list = []
-#     frequencies_list = []
-
-#     for signal in Data:
-#         X_axis, Y2_axis = process_signal(signal, dim, hamiltonian_norm, num_singular_values)
-#         spectra_list.append(Y2_axis)
-#         frequencies, errors = estimate_frequencies_and_compute_error(Y2_axis, X_axis, known_frequencies)
-#         print(errors)
-#         frequencies_list.append(frequencies)
-
-#     # Compute average frequencies from MUSIC results of individual signals
-#     all_frequencies = np.concatenate(frequencies_list)
-#     avg_frequencies = np.mean(all_frequencies, axis=0)
-
-#     # Compute and print the error of the average frequency with respect to the known frequencies
-#     avg_estimated_frequencies, avg_error = estimate_frequencies_and_compute_error(average_spectrum, X_axis_total, known_frequencies)
-#     print(f"Average Frequency: Estimated Frequencies = {avg_estimated_frequencies}, Error = {avg_error}")
-
-#     # Compute jackknife error for the average frequency
-#     jackknife_mean, jackknife_std = jackknife_error(spectra_list, known_frequencies, average_spectrum, X_axis_total)
-#     print(f"Jackknife Error - Mean: {jackknife_mean}, Std: {jackknife_std}")
-
-#     f1 = -7.880859605338688
-#     f2 = -7.751258958257676
-
-#     plot_spectrum(X_axis_total, average_spectrum, avg_estimated_frequencies, f1, f2, "average_freq_plot")
-#     plot_spectrum(X_axis_total, Y2_axis_total, avg_estimated_frequencies, f1, f2, "time_average_freq_plot")
 

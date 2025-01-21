@@ -10,12 +10,12 @@
 source /data/soft/centos7/interpreter/compressed_env/bin/activate
 
 # Set threading environment variables
-export OMP_NUM_THREADS=32
-export MKL_NUM_THREADS=32
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
 
 # ---- Parameters ----
 # Define the ranges or lists of parameters
-nstep_values=(320)           
+nstep_values=(250 350 450 550 650)           
 molecule_names=("lih")        
 
 # Output file for results

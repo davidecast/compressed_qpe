@@ -23,7 +23,7 @@ nso = 12
 ####### calculation dependent parameters
 nstep = args.nstep       # Number of time steps for evolution
 dt = 0.005          # Time step size
-total_shots = np.arange(5, 50, 15).tolist()
+total_shots = np.arange(5, 80, 15).tolist()
 
 # Step 1: Generate Hamiltonian using PySCF 
 hamiltonian = compute_hamiltonian_pyscf(geometry, symbols)
@@ -44,7 +44,6 @@ input_state = input_state/jnp.linalg.norm(input_state)
 # Step 3: Generate noisy autocorrelation signal using quantum evolution
 
 times= jnp.arange(0, nstep, dt)
-#result = compute_evolution2(nstep * (1/dt), hamiltonian, input_state, dt)
 autocorr = compute_autocorrelation(input_state, hamiltonian, times, freq_shift = 0)
 
 
@@ -54,7 +53,7 @@ times_spaced = equally_spaced_points(times, nstep)[0]
 mirrored_signal = transform_signal(signal)
 times_rev = reversed_axis(times_spaced)
 
-np.save(args.molecule+"_hadamard_measurements_npcs_"+str(nstep)+"_steps_infinite_shots_better_integration.npy", mirrored_signal)
+np.save(args.molecule+"_hadamard_measurements_"+str(nstep)+"_steps_infinite_shots.npy", mirrored_signal)
 for shots in total_shots:
     print("Sampling with # " + str(shots) + " shots:", flush = True)
     hadamard_signal_real = [sample_with_hadamard(jnp.real(mirrored_signal), shots)]
@@ -63,7 +62,7 @@ for shots in total_shots:
     hadamard_signal =  np.asarray([hadamard_signal_real[element] + 1j * hadamard_signal_imag[element] for element in range(len(hadamard_signal_imag))])
     hadamard_signal = hadamard_signal.flatten()
 
-    np.save(args.molecule+"_hadamard_measurements_npcs_"+str(nstep)+"_steps_"+str(shots)+"_shots_better_integration.npy", hadamard_signal)
+    np.save(args.molecule+"_hadamard_measurements_"+str(nstep)+"_steps_"+str(shots)+"_shots.npy", hadamard_signal)
 
 
 np.save("test_signal", mirrored_signal)
