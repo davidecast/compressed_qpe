@@ -19,8 +19,10 @@ import time
 from pyscf import gto, scf, ao2mo
 from overlapper.state import do_hf, do_cisd, cisd_state, do_casci, casci_state
 from jax.scipy.linalg import eigh  # For diagonalizing the Hamiltonian
-
-
+from scipy.sparse.linalg import expm_multiply, eigsh
+import gc
+from itertools import combinations
+from numba import njit
 
 
 
@@ -36,6 +38,41 @@ def format_atom_positions(atom_labels, atom_positions):
         formatted_string += f"{label} {position[0]} {position[1]} {position[2]};\n"
     
     return formatted_string
+
+
+def compute_hamiltonian_pyscf_sparse(geometry, symbols, active_el = None, active_orbs = None):
+    geometry = geometry
+
+    formatted_string = format_atom_positions(symbols, geometry)
+
+    mol = gto.M(atom = formatted_string)
+
+    if active_el == None and active_orbs == None:
+
+        rhf = scf.RHF(mol)
+        energy = rhf.kernel()
+
+        one_ao = mol.intor_symmetric('int1e_kin') + mol.intor_symmetric('int1e_nuc')
+        two_ao = mol.intor('int2e_sph')
+        one_mo = np.einsum('pi,pq,qj->ij', rhf.mo_coeff, one_ao, rhf.mo_coeff)
+        two_mo = ao2mo.incore.full(two_ao, rhf.mo_coeff)
+
+        two_mo = np.swapaxes(two_mo, 1, 3)
+
+        core_constant = np.array([rhf.energy_nuc()])    #### here we could just call the qml function with also the active space part 
+    else:
+
+        core_constant, one_mo, two_mo = qml.qchem.openfermion_pyscf._pyscf_integrals(symbols, geometry, active_electrons = active_el, active_orbitals = active_orbs)
+        H_fermionic = qml.qchem.fermionic_observable(core_constant, one_mo, two_mo)
+
+    H_fermionic = qml.qchem.fermionic_observable(core_constant, one_mo, two_mo)
+
+    H = qml.qchem.qubit_observable(H_fermionic)
+
+    hamiltonian_matrix = H.sparse_matrix().real
+
+    return hamiltonian_matrix
+
 
 
 def compute_hamiltonian_pyscf(geometry, symbols, active_el = None, active_orbs = None):
@@ -146,7 +183,7 @@ def set_arbitrary_cisd_state(geometry, symbols, nroots, nstates, verbose = True)
     return mapped_cisd
 
 
-def set_arbitrary_casci_state(geometry, symbols, nroots, nstates, nelecas, ncas, verbose = True):
+def set_arbitrary_casci_state(geometry, symbols, nroots, nstates, nelecas, ncas, ndet_budget=None, padding=True, verbose = True):
     combined_list = format_atom_positions(symbols, geometry)
     mol = gto.M(atom = combined_list)
 
@@ -158,13 +195,20 @@ def set_arbitrary_casci_state(geometry, symbols, nroots, nstates, nelecas, ncas,
         for k in range(len(mycisd_e)):
             print("State number : " + str(k) + " - Energy = " + str(mycisd_e[k]) + " - S^2 = " + str(mycisd_ss[k]), flush = True)
     
+    if padding==True:
+        nao = mycisd.mol.nao
+    else:
+        nao = int(ncas)
     mapped_cisd = []
     for state in nstates:
-        wf_cisd = casci_state(mycisd, state = state, tol=0.15)
+        if ndet_budget==None:
+            wf_cisd = casci_state(mycisd, state = state, padding=padding, tol=0.15)
+        else:
+            wf_cisd = casci_state(mycisd, state=state, padding=padding, tol=1e-2)
+            wf_cisd = wf_budget(wf_cisd, ndet_budget)
+        wf_cisd_reordered = _sign_chem_to_phys(wf_cisd, nao)
 
-        wf_cisd_reordered = _sign_chem_to_phys(wf_cisd, mycisd.mol.nao)
-
-        wf = qml.qchem.convert._wfdict_to_statevector(wf_cisd_reordered, mycisd.mol.nao)
+        wf = qml.qchem.convert._wfdict_to_statevector(wf_cisd_reordered, nao)
 
         mapped_cisd.append(wf)
     return mapped_cisd
@@ -195,7 +239,7 @@ def compare_input_quality(geometry, symbols, nroots, nstates_casci, nstates_cisd
 
         wf_exact = qml.qchem.convert._wfdict_to_statevector(wf_cisd_reordered, mycisd.mol.nao)
 
-        wf_cisd = cisd_state(mycisd, state = state_cisd, tol=0.5)
+        wf_cisd = cisd_state(mycisd, state = state_cisd, tol=0.1)
 
         wf_cisd_reordered = _sign_chem_to_phys(wf_cisd, mycisd.mol.nao)
 
@@ -251,6 +295,242 @@ def set_singly_excited_state(nelecs, nso, excitations, phi = np.pi):
 
 
 ###### set of functions to generate unitary evolution ######
+
+
+
+@njit
+def check_spin_multiplicity(ones_positions, spin_multiplicities):
+    """
+    Checks if a given set of '1' positions satisfies any of the allowed spin multiplicities.
+    
+    Args:
+        ones_positions: Tuple of positions where '1's are located.
+        spin_multiplicities: NumPy array of allowed total Sz values.
+
+    Returns:
+        True if the constraint is satisfied, otherwise False.
+    """
+    sz = 0.0
+    for pos in ones_positions:
+        sz += 0.5 if pos % 2 == 0 else -0.5  # Compute Sz based on position parity
+    
+    # Explicit loop to replace `sz in spin_multiplicities`
+    for s in spin_multiplicities:
+        if int(sz) == s:
+            return True
+    return False
+
+@njit
+def bitwise_index(ones_positions):
+    """
+    Converts a tuple of '1' positions to an integer representation.
+    """
+    index = 0
+    for pos in ones_positions:
+        index |= 1 << pos  # Set bit at position 'pos'
+    return index
+
+def get_indices_by_hamming_weight_and_spin(n, w, spin_multiplicities):
+    """
+    Returns a sorted list of indices corresponding to binary strings of length n 
+    that have exactly w ones and satisfy any allowed spin multiplicity.
+
+    Args:
+        n: Length of binary string.
+        w: Hamming weight (number of 1s).
+        spin_multiplicities: List or array of allowed total Sz values.
+
+    Returns:
+        A NumPy array of valid indices.
+    """
+    spin_multiplicities = np.array(spin_multiplicities, dtype=np.int32)  # Ensure it's a NumPy array
+
+    valid_indices = [
+        bitwise_index(ones_positions)
+        for ones_positions in combinations(range(n), w)
+        if check_spin_multiplicity(ones_positions, spin_multiplicities)
+    ]
+    
+    return np.array(valid_indices, dtype=np.int64)
+
+
+def get_indices_by_hamming_weight(n, w):
+    """
+    Returns the indices (as integers) of all binary strings of length n with Hamming weight w.
+    """
+    return np.array([sum(1 << i for i in ones) for ones in combinations(range(n), w)])
+
+def extend_eigenvectors(eigenvectors, selected_indices, full_size):
+    """
+    Expands eigenvectors from the subspace back to the full space by zero-padding.
+    """
+    k = eigenvectors.shape[1]  # Number of eigenvectors
+    extended_vectors = np.zeros((full_size, k), dtype=np.complex128)
+
+    # Place each component in the correct location
+    for new_index, old_index in enumerate(selected_indices):
+        extended_vectors[old_index, :] = eigenvectors[new_index, :]
+
+    return extended_vectors
+
+def compute_autocorrelation_sparse4(psi_0, H, times, n, w, spin_multiplicity, hbar=1.0, freq_shift=0, k_eigen=1000):
+    """
+    Computes the autocorrelation function C(t) = <psi_0 | psi(t)> using sparse matrix diagonalization,
+    restricting the Hamiltonian to a subspace with a given Hamming weight and spin multiplicity.
+    
+    Args:
+        psi_0: Initial wavefunction as a 1D complex NumPy array.
+        H: Time-independent sparse Hamiltonian (scipy.sparse matrix).
+        times: 1D array of times at which to compute the autocorrelation function.
+        n: Length of binary strings (size of Hilbert space is 2^n).
+        w: Hamming weight for subspace selection.
+        spin_multiplicity: Desired total Sz value.
+        hbar: Reduced Planck constant (default is 1.0, natural units).
+        freq_shift: Frequency shift to adjust the eigenvalues.
+        k_eigen: Number of eigenvalues to compute (None means full diagonalization, otherwise uses eigsh).
+
+    Returns:
+        A 1D NumPy array representing the autocorrelation function at each time.
+    """
+    # Step 1: Extract submatrix corresponding to the given Hamming weight & spin multiplicity
+    selected_indices = get_indices_by_hamming_weight_and_spin(n, w, spin_multiplicity)
+    print(len(selected_indices))
+    submatrix = H[selected_indices, :][:, selected_indices].toarray()
+
+    # Step 2: Compute eigenvalues & eigenvectors in the subspace
+    #num_eigen = min(k_eigen, submatrix.shape[0])  # Ensure k_eigen is not larger than the submatrix
+    eigenvalues, sub_eigenvectors = eigh(submatrix)  # Smallest eigenvalues
+
+    # Step 3: Extend eigenvectors back to full space
+    eigenvectors = extend_eigenvectors(sub_eigenvectors, selected_indices, H.shape[0])
+
+    # Step 4: Apply frequency shift
+    eigenvalues += freq_shift
+
+    # Step 5: Transform initial state into eigenbasis
+    psi_0_in_eigenbasis = eigenvectors.T.conj() @ psi_0
+
+    # Compute |c_i|^2 for each eigencomponent
+    coefficients_squared = np.abs(psi_0_in_eigenbasis) ** 2
+
+    # Define the autocorrelation function
+    def autocorrelation(t):
+        evolution_factors = jnp.exp(-1j * eigenvalues * t / hbar)
+        return jnp.sum(coefficients_squared * evolution_factors)
+
+    # Use JAX lax.scan for efficient computation over time
+    def scan_fn(carry, t):
+        autocorr_val = autocorrelation(t)
+        return carry, autocorr_val
+
+    _, autocorrelation_values = jax.lax.scan(scan_fn, None, times)
+    return autocorrelation_values
+
+def compute_autocorrelation_sparse3(psi_0, H, times, n, w, spin_multiplicity, hbar=1.0, freq_shift=0, k_eigen=1000):
+    """
+    Computes the autocorrelation function C(t) = <psi_0 | psi(t)> using sparse matrix diagonalization,
+    restricting the Hamiltonian to a subspace with a given Hamming weight and spin multiplicity.
+    
+    Args:
+        psi_0: Initial wavefunction as a 1D complex NumPy array.
+        H: Time-independent sparse Hamiltonian (scipy.sparse matrix).
+        times: 1D array of times at which to compute the autocorrelation function.
+        n: Length of binary strings (size of Hilbert space is 2^n).
+        w: Hamming weight for subspace selection.
+        spin_multiplicity: Desired total Sz value.
+        hbar: Reduced Planck constant (default is 1.0, natural units).
+        freq_shift: Frequency shift to adjust the eigenvalues.
+        k_eigen: Number of eigenvalues to compute (None means full diagonalization, otherwise uses eigsh).
+
+    Returns:
+        A 1D NumPy array representing the autocorrelation function at each time.
+    """
+    # Step 1: Extract submatrix corresponding to the given Hamming weight & spin multiplicity
+    selected_indices = get_indices_by_hamming_weight_and_spin(n, w, spin_multiplicity)
+    print(len(selected_indices))
+    submatrix = H[selected_indices, :][:, selected_indices]
+
+    # Step 2: Compute eigenvalues & eigenvectors in the subspace
+    num_eigen = min(k_eigen, submatrix.shape[0])  # Ensure k_eigen is not larger than the submatrix
+    eigenvalues, sub_eigenvectors = eigsh(submatrix, k=num_eigen, which='SA')  # Smallest eigenvalues
+
+    # Step 3: Extend eigenvectors back to full space
+    eigenvectors = extend_eigenvectors(sub_eigenvectors, selected_indices, H.shape[0])
+
+    # Step 4: Apply frequency shift
+    eigenvalues += freq_shift
+
+    # Step 5: Transform initial state into eigenbasis
+    psi_0_in_eigenbasis = eigenvectors.T.conj() @ psi_0
+
+    # Compute |c_i|^2 for each eigencomponent
+    coefficients_squared = np.abs(psi_0_in_eigenbasis) ** 2
+
+    # Define the autocorrelation function
+    def autocorrelation(t):
+        evolution_factors = jnp.exp(-1j * eigenvalues * t / hbar)
+        return jnp.sum(coefficients_squared * evolution_factors)
+
+    # Use JAX lax.scan for efficient computation over time
+    def scan_fn(carry, t):
+        autocorr_val = autocorrelation(t)
+        return carry, autocorr_val
+
+    _, autocorrelation_values = jax.lax.scan(scan_fn, None, times)
+    return autocorrelation_values
+
+def compute_autocorrelation_sparse2(psi_0, H, times, n, w, hbar=1.0, freq_shift=0, k_eigen=400):
+    """
+    Computes the autocorrelation function C(t) = <psi_0 | psi(t)> using sparse matrix diagonalization,
+    restricting the Hamiltonian to a subspace with a given Hamming weight.
+    
+    Args:
+        psi_0: Initial wavefunction as a 1D complex NumPy array.
+        H: Time-independent sparse Hamiltonian (scipy.sparse matrix).
+        times: 1D array of times at which to compute the autocorrelation function.
+        n: Length of binary strings (size of Hilbert space is 2^n).
+        w: Hamming weight for subspace selection.
+        hbar: Reduced Planck constant (default is 1.0, natural units).
+        freq_shift: Frequency shift to adjust the eigenvalues.
+        k_eigen: Number of eigenvalues to compute (None means full diagonalization, otherwise uses eigsh).
+
+    Returns:
+        A 1D NumPy array representing the autocorrelation function at each time.
+    """
+    # Step 1: Extract submatrix corresponding to the given Hamming weight
+    selected_indices = get_indices_by_hamming_weight(n, w)
+    submatrix = H[selected_indices, :][:, selected_indices]
+
+    # Step 2: Compute eigenvalues & eigenvectors in the subspace
+    num_eigen = min(k_eigen, submatrix.shape[0])  # Ensure k_eigen is not larger than the submatrix
+    eigenvalues, sub_eigenvectors = eigsh(submatrix, k=num_eigen, which='SA')  # Smallest eigenvalues
+    print(eigenvalues[0])
+
+    # Step 3: Extend eigenvectors back to full space
+    eigenvectors = extend_eigenvectors(sub_eigenvectors, selected_indices, H.shape[0])
+
+    # Step 4: Apply frequency shift
+    eigenvalues += freq_shift
+
+    # Step 5: Transform initial state into eigenbasis
+    psi_0_in_eigenbasis = eigenvectors.T.conj() @ psi_0
+
+    # Compute |c_i|^2 for each eigencomponent
+    coefficients_squared = np.abs(psi_0_in_eigenbasis) ** 2
+
+    # Define the autocorrelation function
+    def autocorrelation(t):
+        evolution_factors = jnp.exp(-1j * eigenvalues * t / hbar)
+        return jnp.sum(coefficients_squared * evolution_factors)
+
+    # Use JAX lax.scan for efficient computation over time
+    def scan_fn(carry, t):
+        autocorr_val = autocorrelation(t)
+        return carry, autocorr_val
+
+    _, autocorrelation_values = jax.lax.scan(scan_fn, None, times)
+    return autocorrelation_values
+
 
 
 def compute_autocorrelation(psi_0, H, times, hbar=1.0, freq_shift = 8):
@@ -371,6 +651,7 @@ def extract_points(vector, indices):
     """
     return vector[indices]
 
+
 def equally_spaced_points(points, M):
     """
     Generate `M` equally spaced points from the input `points`.
@@ -413,6 +694,13 @@ def evenly_spaced_elements(arr, x):
 
 def transform_signal(signal):
     new_signal = jnp.hstack((jnp.conj(signal[::-1]), signal[1:]))
+    # conj_signal = jnp.conj(signal)
+    # middle_value = jnp.array([1.0 + 0.0j])  # Ensure the middle value is complex
+    # new_signal = jnp.concatenate((conj_signal, middle_value, signal))
+    return new_signal
+
+def mirror_axis(signal):
+    new_signal = jnp.hstack((-jnp.conj(signal[::-1]), signal[1:]))
     # conj_signal = jnp.conj(signal)
     # middle_value = jnp.array([1.0 + 0.0j])  # Ensure the middle value is complex
     # new_signal = jnp.concatenate((conj_signal, middle_value, signal))
