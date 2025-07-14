@@ -7,6 +7,7 @@ Created on Wed Sep  12 17:51:17 2024
 """
 
 import numpy as np
+import jax.numpy as jnp
 import math
 from scipy.signal import find_peaks
 from matplotlib import pyplot as plt
@@ -20,29 +21,67 @@ def construct_projector(S, dim, num_singular_values):
         P += prony.projector(v, dim)
     return P
 
-def compute_music_spectrum(P2, dim, hamiltonian_norm):
-    """Compute the MUSIC spectrum."""
-    N = 180000
-    X_axis = np.zeros(N)
-    Y2_axis = np.zeros(N)
+def compute_batch(P2, freqs_batch, dim, hamiltonian_norm):
+    """Compute MUSIC spectrum for a batch of frequencies."""
+    l = jnp.arange(dim)
+    V_temp_batch = jnp.exp(1j * 2 * jnp.pi * freqs_batch[:, None] * l)
+    V_transformed_batch = jnp.dot(P2, V_temp_batch.T).T  # Shape: (batch_size, dim)
 
-    freqs = np.fft.rfftfreq(2 * N, d=1/2)[:-1]
-    l = np.arange(dim)
-    for n in range(N):
-        w = freqs[n]
-        V_temp = np.zeros(dim, dtype=complex)
+    # Compute squared norm for each row (vector) using einsum
+    norm_squared = jnp.einsum('ij,ij->i', V_transformed_batch, jnp.conj(V_transformed_batch))
+
+    X_batch = -freqs_batch * hamiltonian_norm * 2 * jnp.pi
+    Y2_batch = 1 / jnp.sqrt(jnp.abs(norm_squared) / dim)
+
+    return X_batch, Y2_batch
+
+def compute_music_spectrum(P2, dim, hamiltonian_norm, batch_size=600000):
+    """Compute MUSIC spectrum using batching to fit within 8GB of memory."""
+    N = 3600000
+    freqs = jnp.fft.rfftfreq(2 * N, d=1 / 2)[:-1]
+
+    num_batches = N // batch_size
+    results = []
+
+    for i in range(num_batches):
+        freqs_batch = freqs[i * batch_size : (i + 1) * batch_size]
+        X_batch, Y2_batch = compute_batch(P2, freqs_batch, dim, hamiltonian_norm)
+        results.append((X_batch, Y2_batch))
+
+    # Handle last remaining batch if N is not divisible by batch_size
+    remainder = N % batch_size
+    if remainder > 0:
+        freqs_batch = freqs[-remainder:]
+        X_batch, Y2_batch = compute_batch(P2, freqs_batch, dim, hamiltonian_norm)
+        results.append((X_batch, Y2_batch))
+
+    # Concatenate final results
+    X_axis, Y2_axis = zip(*results)
+    return jnp.concatenate(X_axis), jnp.concatenate(Y2_axis)
+
+#def compute_music_spectrum(P2, dim, hamiltonian_norm):
+#    """Compute the MUSIC spectrum."""
+#    N = 600000
+#    X_axis = np.zeros(N)
+#    Y2_axis = np.zeros(N)
+#
+#    freqs = np.fft.rfftfreq(2 * N, d=1/2)[:-1]
+#    l = np.arange(dim)
+#    for n in range(N):
+#        w = freqs[n]
+#        V_temp = np.zeros(dim, dtype=complex)
         # for l in range(dim):
         #     V_temp[l] = math.cos(2 * np.pi * w * l) + 1j * math.sin(2 * np.pi * w * l)
-        V_temp = np.exp(1j * 2 * np.pi * w * l)
+#        V_temp = np.exp(1j * 2 * np.pi * w * l)
 
-        V_temp = P2.dot(V_temp)
+#        V_temp = P2.dot(V_temp)
 
-        X_axis[n] = -w * hamiltonian_norm * 2 * np.pi 
-        Y2_axis[n] = 1 / math.sqrt(abs(np.vdot(V_temp, V_temp)) / dim)
+#        X_axis[n] = -w * hamiltonian_norm * 2 * np.pi 
+#        Y2_axis[n] = 1 / math.sqrt(abs(np.vdot(V_temp, V_temp)) / dim)
 
-    return X_axis, Y2_axis
+#    return X_axis, Y2_axis
 
-def estimate_frequencies_and_compute_error(Y2_axis, X_axis, known_frequencies, threshold=5):
+def estimate_frequencies_and_compute_error(Y2_axis, X_axis, known_frequencies, threshold=2):
     """Estimate frequencies from the MUSIC spectrum and compute the error with respect to known frequencies."""
     peaks, _ = find_peaks(Y2_axis, height=threshold)
     estimated_frequencies = X_axis[peaks]
