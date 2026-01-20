@@ -10,20 +10,10 @@ import numba as nb
 from utils_ivdst import guess_autocorr, randomly_select_points
 
 
-def load_data_old(molecule, samples, steps):
-    """
-    Load the signal vector and the indices of non-null values.
-    """
-    z = np.load(f"{molecule}hadamard_signal_cf0.3{samples}_{steps}steps.npy", allow_pickle=True)[0]  
-    non_null_indices = np.real(np.load(f"{molecule}hadamard_signal_random_measurement_cf0.3_{steps}steps.npy")[0][1])
-    return z, non_null_indices
-
 def load_data(file_name, samples = 50):
     z = np.load(file_name)
-    _, non_null_indices = randomly_select_points(z, samples)
+    _, _, _, _, non_null_indices = randomly_select_points(z, samples)
     return z, non_null_indices
-
-
 
 def create_modified_identity_matrix(size, zero_indexes):
     """
@@ -33,18 +23,8 @@ def create_modified_identity_matrix(size, zero_indexes):
     I[zero_indexes, zero_indexes] = 1
     return I
 
-
-# Define a helper function to process one diagonal
-def process_diagonal(first_column, first_row, index, matrix):
-
-    first_column = jnp.append(first_column, jnp.mean(extract_diagonal(matrix, k =  -abs(index))))
-    first_row = jnp.append(first_row, jnp.mean(extract_diagonal(matrix, k =  index)))
-
-    return first_column, first_row
-
 @nb.jit
 def compute(mat, n):
-    #n = mat.shape[0]
     output = np.zeros(n*2-1, dtype=np.complex64)
     for i in range(n-1, -1, -1):
         output[i:i+n] += mat[n-1-i]
@@ -83,7 +63,7 @@ def initialization_from_file(filename, samples = 20):
 
     ni0 = jnp.trace(T0) / jnp.shape(r0)[0]
 
-    return z, T0, ni0, non_null_indices
+    return z, T0, ni0, non_null_indices, masked_z
 
 def initialization_theoretical_guess_from_file(filename, guess_freq, samples = 20):  #### here we have to ensure that we are taking the gradients w.r.t. measurements only
     z, non_null_indices = load_data(filename, samples)
@@ -95,7 +75,7 @@ def initialization_theoretical_guess_from_file(filename, guess_freq, samples = 2
     T0 = make_toeplitz_matrix(r0)
 
     ni0 = jnp.trace(T0) / jnp.shape(r0)[0]
-    return z, T0, ni0, non_null_indices
+    return z, T0, ni0, non_null_indices, artificial_z
 
 def initialization(molecule, samples, steps):
     z, non_null_indices = load_data(molecule, samples, steps)
@@ -151,31 +131,6 @@ def apply_momentum(variables, previous_variables, iteration_numb, last_momentum_
         new_momentum_coeff = 1 + jnp.sqrt(5) * 0.5
 
     return new_variables, new_momentum_coeff
-
-
-@jit
-def toeplitz_vandermonde_decomposition(toeplitz_matrix, rcond = 1e-3): ### this is working only for symmetric toeplitz matrices, ours are hermitian :( !!!! It is now working, before we were facing numerical stability issues. 
-
-    n = jnp.shape(toeplitz_matrix)[0]
-
-    v = jnp.ones(n, dtype='complex128')
-
-    T_regularized = toeplitz_matrix #+ 0.0175 * jnp.eye(n)  ## in the original algorithm there is no regularization here
-    
-    a = jnp.linalg.solve(T_regularized, v) 
-    #a = jax.scipy.linalg.solve(T_regularized, v, assume_a = "her") #### not clear which one is the fastest option
-
-    vander_coeff = jnp.roots(a, strip_zeros = False) ### strip_zeros = False for jitting-compatibility
-
-    vander_coeff = jnp.append(jnp.array([1]), vander_coeff)
-
-    V = jnp.vander(vander_coeff, increasing = True)
-
-    D = jnp.linalg.inv(jnp.conj(jnp.transpose(V))) @ toeplitz_matrix @ jnp.linalg.inv(V)
-
-    #reconstruction = jnp.conj(V.T) @ D @ V 
-
-    return V, D#, reconstruction
 
 
 @jit
@@ -289,34 +244,38 @@ def apply_proximal_mapping(variables, lam_threshold):
     return (new_signal, new_T_matrix, new_scalar_ni)
 
 
-def check_convergence(new_T_matrix, old_T_matrix, iteration_numb):
+def check_convergence(new_T_matrix, old_T_matrix, iteration_numb, compute = False):
     
-    convergence = jnp.linalg.norm(new_T_matrix - old_T_matrix) / jnp.linalg.norm(old_T_matrix)
+    if compute == True:
+        convergence = jnp.linalg.norm(new_T_matrix - old_T_matrix) / jnp.linalg.norm(old_T_matrix)
+    else:
+        convergence = None
 
     iteration_numb = iteration_numb + 1
     return convergence, iteration_numb
 
 def run_ivdst_from_file(filename, frequencies = None, samples = 50):
     if frequencies == None:
-        z, T2, ni0, non_null_indices = initialization_from_file(filename, samples)
+        z, T2, ni0, non_null_indices, init_z = initialization_from_file(filename, samples)
     else:
-        z, T2, ni0, non_null_indices = initialization_theoretical_guess_from_file(filename, frequencies, samples)
+        z, T2, ni0, non_null_indices, init_z = initialization_theoretical_guess_from_file(filename, frequencies, samples)
 
-    variables = (z, T2, ni0)
+    variables = (init_z, T2, ni0)
 
     mask = create_modified_identity_matrix(len(z), non_null_indices)
 
     new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = one_step_iteration(z, mask, variables, None, 0, None, 0.5, 1e-3)
     print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
-
     conv = convergence
 
-    while conv > 1e-6 and new_iteration_numb < 500:
+    while new_iteration_numb < 800:
 
-        new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = one_step_iteration(z, mask, new_variables, variables, new_iteration_numb, old_momentum_coeff, 3e-2, 1e-3)
+        new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = one_step_iteration(z, mask, new_variables, variables, new_iteration_numb, old_momentum_coeff, 0.5, 1e-3)
         conv = convergence
         if (new_iteration_numb % 20) == 0:
-            print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
+            print("Currently at iter. num : " + str(new_iteration_numb))
+    
+    print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(check_convergence(new_variables[1], variables[1], new_iteration_numb, True)))
 
     return new_variables[0], non_null_indices
 
