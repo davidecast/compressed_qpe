@@ -20,10 +20,13 @@ import time
 ###### set of functions to generate unitary evolution ######
 
 
-def compute_cost(indices, shots, N):
+def compute_cost(indices, shots, N, mirrored = True):
 
     def adjust_indices(indices):
-        return [element if element < N // 2 else element // 2 for element in indices]
+        if mirrored == False:
+            return [element if element < N // 2 else element // 2 for element in indices]
+        else:
+            return [element if element < N // 2 else 0 for element in indices]
     
     indices = adjust_indices(indices)
     max_t = np.max(indices)
@@ -81,13 +84,59 @@ def guess_autocorr(frequencies, N):
     
     signal /= np.max(signal)
 
-    # Normalize the signal
-    #signal /= np.linalg.norm(signal)
-
     return signal
 
+def randomly_select_points(signal, num_points, return_mirrored=True, return_all_indices=True):
+    """
+    Randomly selects points from the first half of a conjugate-symmetric
+    signal of length 2N+1. 
+    Returns a fixed-size tuple for a stable API.
 
-def randomly_select_points(signal, num_points):
+    Args:
+
+    - signal (array_like): Input signal, length must be 2N+1.
+    - num_points (int): Number of points to select (from first half + center).
+    - return_mirrored (bool): Whether to return mirrored points/indices.
+    - return_all_indices (bool): Whether to return all indices
+    (selected + mirrored).
+
+    Returns:
+
+    - selected_points (array)
+    - selected_indices (array)
+    - mirrored_points (array or None)
+    - mirrored_indices (array or None)
+    - all_indices (array or None)
+    """
+    L = len(signal)
+    N = (L - 1) // 2
+
+    key = jrandom.PRNGKey(int(time.time()))
+    selected_indices = jrandom.choice(
+        key,
+        N + 1,
+        (num_points,),
+        replace=False,
+    )
+
+    selected_points = signal[selected_indices]
+
+    mirrored_indices = None
+    mirrored_points = None
+    all_indices = None
+
+    if return_mirrored or return_all_indices:
+        mirrored_indices = ((2 * N)) - selected_indices
+        mirrored_points = signal[mirrored_indices]
+
+    if return_all_indices:
+        all_indices = jnp.concatenate( [selected_indices, mirrored_indices])
+
+
+    return (selected_points, selected_indices, mirrored_points, mirrored_indices, all_indices)
+
+
+def randomly_select_points_no_mirroring(signal, num_points):
     """
     Randomly selects a specified number of points from the given signal.
 
@@ -102,6 +151,7 @@ def randomly_select_points(signal, num_points):
     signal_length = len(signal)
     key = jrandom.PRNGKey(int(time.time()))
     selected_indices = jrandom.choice(key, signal_length, (num_points, ), replace=False)
+
     selected_points = signal[selected_indices]
     return selected_points, selected_indices
 
