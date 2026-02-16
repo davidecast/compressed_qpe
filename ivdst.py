@@ -10,6 +10,7 @@ import numba as nb
 from utils_ivdst import guess_autocorr, randomly_select_points
 
 
+# Helper functions for matrix operations
 def load_data(file_name, samples = 50):
     z = np.load(file_name)
     _, _, _, _, non_null_indices = randomly_select_points(z, samples)
@@ -52,6 +53,248 @@ def toeplitz_to_hankel(toeplitz_matrix):
     
     return hankel_matrix
 
+
+class IVDSTSolver:
+    """
+    IVDST (Iterative Vandermonde Decomposition with Soft Thresholding) Solver.
+    
+    This class encapsulates the IVDST algorithm for signal reconstruction
+    from compressed measurements.
+    """
+    
+    def __init__(self, step_size=0.5, lam_threshold=1e-3, max_iterations=800):
+        """
+        Initialize the IVDST solver.
+        
+        Args:
+            step_size: Step size for gradient descent
+            lam_threshold: Threshold for soft thresholding
+            max_iterations: Maximum number of iterations
+        """
+        self.step_size = step_size
+        self.lam_threshold = lam_threshold
+        self.max_iterations = max_iterations
+        self.z = None
+        self.T_matrix = None
+        self.scalar_ni = None
+        self.mask = None
+        self.non_null_indices = None
+        
+    def initialize_from_file(self, filename, samples=20, guess_frequencies=None):
+        """
+        Initialize solver from a file.
+        
+        Args:
+            filename: Path to data file
+            samples: Number of samples to use
+            guess_frequencies: Optional initial frequency guess
+            
+        Returns:
+            self for method chaining
+        """
+        self.z, self.non_null_indices = load_data(filename, samples)
+        
+        if guess_frequencies is None:
+            mask = create_modified_identity_matrix(len(self.z), self.non_null_indices)
+            masked_z = jnp.dot(jnp.transpose(mask), self.z)
+            r0 = jnp.outer(masked_z, jnp.conj(masked_z))
+            init_z = masked_z
+        else:
+            artificial_z = guess_autocorr(guess_frequencies, len(self.z))
+            r0 = jnp.outer(artificial_z, jnp.conj(artificial_z))
+            init_z = artificial_z
+        
+        self.T_matrix = make_toeplitz_matrix(r0)
+        self.scalar_ni = jnp.trace(self.T_matrix) / jnp.shape(r0)[0]
+        self.mask = create_modified_identity_matrix(len(self.z), self.non_null_indices)
+        
+        return init_z
+    
+    def initialize(self, molecule, samples, steps, guess_frequencies=None):
+        """
+        Initialize solver from molecule data.
+        
+        Args:
+            molecule: Molecule identifier
+            samples: Number of samples
+            steps: Number of steps
+            guess_frequencies: Optional initial frequency guess
+            
+        Returns:
+            Initial signal
+        """
+        self.z, self.non_null_indices = load_data(molecule, samples, steps)
+        
+        if guess_frequencies is None:
+            init_z = self.z
+        else:
+            init_z = guess_autocorr(guess_frequencies, len(self.z))
+        
+        r0 = jnp.outer(init_z, jnp.conj(init_z))
+        self.T_matrix = make_toeplitz_matrix(r0)
+        self.scalar_ni = jnp.trace(self.T_matrix) / jnp.shape(r0)[0]
+        self.mask = create_modified_identity_matrix(len(self.z), self.non_null_indices)
+        
+        return init_z
+    
+    def one_step_iteration(self, variables, previous_variables, iteration_numb, last_momentum_coeff):
+        """
+        Perform one iteration of the IVDST algorithm.
+        
+        Args:
+            variables: Current variables (signal, T_matrix, scalar_ni)
+            previous_variables: Previous iteration variables
+            iteration_numb: Current iteration number
+            last_momentum_coeff: Momentum coefficient from last iteration
+            
+        Returns:
+            Tuple of (new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence)
+        """
+        mod_variables, old_momentum_coeff = self._apply_momentum(
+            variables, previous_variables, iteration_numb, last_momentum_coeff
+        )
+        
+        descended_variables = self._apply_gradient_descent(mod_variables)
+        
+        new_variables = self._apply_proximal_mapping(descended_variables)
+        
+        convergence, new_iteration_numb = self._check_convergence(
+            new_variables[1], variables[1], iteration_numb
+        )
+        
+        return new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence
+    
+    def _apply_momentum(self, variables, previous_variables, iteration_numb, last_momentum_coeff):
+        """Apply momentum to variables."""
+        if iteration_numb != 0:
+            new_momentum_coeff = 1 + jnp.sqrt(4 * jnp.power(last_momentum_coeff, 2) + 1) * 0.5
+            
+            for element1, element2 in zip(variables, previous_variables):
+                element1 = element1 + (element1 - element2) * ((last_momentum_coeff - 1) / new_momentum_coeff)
+            
+            new_variables = variables
+        else:
+            new_variables = variables
+            new_momentum_coeff = 1 + jnp.sqrt(5) * 0.5
+        
+        return new_variables, new_momentum_coeff
+    
+    def _apply_gradient_descent(self, variables):
+        """Apply gradient descent step."""
+        signal, T_matrix, scalar_ni = variables
+        measurements = jnp.dot(self.mask, self.z)
+        updated_signal = signal - self.step_size * jnp.dot(
+            self.mask, (jnp.dot(self.mask, signal) - measurements)
+        )
+        return (updated_signal, T_matrix, scalar_ni)
+    
+    def _apply_proximal_mapping(self, variables):
+        """Apply proximal mapping operator."""
+        signal, T_matrix, scalar_ni = variables
+        
+        T_low_rank, D_threshold = soft_threshold_psd_svd(T_matrix, self.lam_threshold)
+        
+        new_scalar_ni = jnp.sum(D_threshold)
+        
+        Z = build_Z_matrix((signal, T_low_rank, new_scalar_ni))
+        
+        Z_np = np.array(Z)
+        
+        num_eigvecs = int(jnp.count_nonzero(D_threshold) + 1)
+        
+        eigvals, eigvecs = eigh(Z_np, subset_by_index=[Z_np.shape[0] - num_eigvecs, Z_np.shape[0] - 1])
+        D = jnp.diag(eigvals)
+        D_threshold = jnp.where(D > 0, D, 0)
+        Z_thresholded = eigvecs @ D_threshold @ jnp.conj(jnp.transpose(eigvecs))
+        
+        N = len(signal)
+        
+        new_T_matrix = make_toeplitz_matrix(Z_thresholded[:N, :N])
+        
+        new_signal = Z_thresholded[:N, -1]
+        
+        new_scalar_ni = Z_thresholded[-1, -1]
+        
+        return (new_signal, new_T_matrix, new_scalar_ni)
+    
+    def _check_convergence(self, new_T_matrix, old_T_matrix, iteration_numb, compute=False):
+        """Check convergence criterion."""
+        if compute:
+            convergence = jnp.linalg.norm(new_T_matrix - old_T_matrix) / jnp.linalg.norm(old_T_matrix)
+        else:
+            convergence = None
+        
+        iteration_numb = iteration_numb + 1
+        return convergence, iteration_numb
+    
+    def solve_from_file(self, filename, guess_frequencies=None, samples=50):
+        """
+        Main solving method for file input.
+        
+        Args:
+            filename: Path to data file
+            guess_frequencies: Optional initial frequency guess
+            samples: Number of samples to use
+            
+        Returns:
+            Tuple of (reconstructed_signal, non_null_indices)
+        """
+        init_z = self.initialize_from_file(filename, samples, guess_frequencies)
+        
+        variables = (init_z, self.T_matrix, self.scalar_ni)
+        
+        new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = \
+            self.one_step_iteration(variables, None, 0, None)
+        print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
+        
+        while new_iteration_numb < self.max_iterations:
+            new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = \
+                self.one_step_iteration(new_variables, variables, new_iteration_numb, old_momentum_coeff)
+            
+            if (new_iteration_numb % 20) == 0:
+                print("Currently at iter. num : " + str(new_iteration_numb))
+        
+        final_convergence = self._check_convergence(
+            new_variables[1], variables[1], new_iteration_numb, True
+        )
+        print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(final_convergence))
+        
+        return new_variables[0], self.non_null_indices
+    
+    def solve(self, molecule, samples, steps, guess_frequencies=None, convergence_threshold=1e-6):
+        """
+        Main solving method for molecule data.
+        
+        Args:
+            molecule: Molecule identifier
+            samples: Number of samples
+            steps: Number of steps
+            guess_frequencies: Optional initial frequency guess
+            convergence_threshold: Threshold for convergence
+            
+        Returns:
+            Tuple of (reconstructed_signal, non_null_indices)
+        """
+        init_z = self.initialize(molecule, samples, steps, guess_frequencies)
+        
+        variables = (init_z, self.T_matrix, self.scalar_ni)
+        
+        new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = \
+            self.one_step_iteration(variables, None, 0, None)
+        print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
+        
+        conv = convergence
+        
+        while conv > convergence_threshold:
+            new_variables, variables, new_iteration_numb, old_momentum_coeff, convergence = \
+                self.one_step_iteration(new_variables, variables, new_iteration_numb, old_momentum_coeff)
+            conv = convergence
+            print("Convergence at iter. num " + str(new_iteration_numb) + " is : " + str(convergence))
+        
+        return new_variables[0], self.non_null_indices
+
+
+# Legacy functions for backward compatibility
 def initialization_from_file(filename, samples = 20):
     z, non_null_indices = load_data(filename, samples)
     mask = create_modified_identity_matrix(len(z), non_null_indices)
