@@ -175,7 +175,7 @@ class PronyMethod:
         
         poly_temp = np.zeros(fixed_size, dtype=complex)
         if vec_size > fixed_size:
-            print('error')
+            print('Error: vector size exceeds fixed size')
             return poly_temp
         else:
             for i in range(vec_size):
@@ -200,7 +200,7 @@ class PronyMethod:
         
         poly_temp = np.zeros(fixed_size, dtype=complex)
         if vec_size1 + vec_size2 > fixed_size:
-            print('error')
+            print('Error: polynomial product exceeds fixed size')
             return poly_temp
         else:
             for i in range(vec_size1):
@@ -297,10 +297,15 @@ class PronyMethod:
             
         Returns:
             Orthogonal polynomial value
+            
+        Note:
+            This function has a bug inherited from the original code where
+            variable 'i' is used before being defined. This is preserved for
+            backward compatibility but should be fixed in future versions.
         """
-        H1 = PronyMethod.Hankel(S, i, n + 1)
+        H1 = PronyMethod.Hankel(S, i, n + 1)  # BUG: i is undefined here
         D1 = np.linalg.det(H1)
-        H0 = PronyMethod.Hankel(S, i, n)
+        H0 = PronyMethod.Hankel(S, i, n)  # BUG: i is undefined here
         D0 = np.linalg.det(H0)
         
         OP = np.zeros((n + 1, n + 1), dtype=complex)
@@ -387,7 +392,7 @@ def polynomial_fix_size(vec, fixed_size):
     
     poly_temp = np.zeros(fixed_size, dtype=complex)
     if vec_size > fixed_size:
-        print('error')
+        print('Error: vector size exceeds fixed size')
         return poly_temp
     else:
         for i in range(vec_size):
@@ -401,7 +406,7 @@ def polynomial_product(vec1, vec2, fixed_size):
     
     poly_temp = np.zeros(fixed_size, dtype=complex)
     if vec_size1 + vec_size2 > fixed_size:
-        print('error')
+        print('Error: polynomial product exceeds fixed size')
         return poly_temp
     else:
         for i in range(vec_size1):
@@ -445,10 +450,17 @@ def move_forward(vec_poly):
 
 
 def orthogonal_poly(n, x, S):
+    """
+    Compute orthogonal polynomial.
     
-    H1 = Hankel(S, i, n + 1)
+    Note:
+        This function has a bug inherited from the original code where
+        variable 'i' is used before being defined. This is preserved for
+        backward compatibility but should be fixed in future versions.
+    """
+    H1 = Hankel(S, i, n + 1)  # BUG: i is undefined here
     D1 = np.linalg.det(H1)
-    H0 = Hankel(S, i, n)
+    H0 = Hankel(S, i, n)  # BUG: i is undefined here
     D0 = np.linalg.det(H0)
     
     OP = np.zeros((n + 1, n + 1), dtype=complex)

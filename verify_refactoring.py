@@ -23,8 +23,8 @@ def check_file_structure(filename):
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             classes.append(node.name)
-        elif isinstance(node, ast.FunctionDef) and isinstance(node, ast.FunctionDef):
-            # Only top-level functions (not methods)
+        elif isinstance(node, ast.FunctionDef):
+            # Collect all functions
             functions.append(node.name)
     
     # Get unique items (ast.walk gets duplicates)
