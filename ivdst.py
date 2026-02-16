@@ -181,12 +181,7 @@ class IVDSTSolver:
     
     def _apply_gradient_descent(self, variables):
         """Apply gradient descent step."""
-        signal, T_matrix, scalar_ni = variables
-        measurements = jnp.dot(self.mask, self.z)
-        updated_signal = signal - self.step_size * jnp.dot(
-            self.mask, (jnp.dot(self.mask, signal) - measurements)
-        )
-        return (updated_signal, T_matrix, scalar_ni)
+        return apply_gradient_descent(variables, self.z, self.mask, self.step_size)
     
     def _apply_proximal_mapping(self, variables):
         """Apply proximal mapping operator."""
